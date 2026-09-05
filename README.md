@@ -46,6 +46,33 @@ Key package versions inside:
 The overlays in `patches/` are written against exactly these versions. If you
 build a different vLLM/LMCache, diff the originals before mounting.
 
+### Building the image yourself
+
+The image is a stock upstream build — no bespoke layers. `docker history` of
+the production image shows the standard vLLM `docker/Dockerfile` args;
+`INSTALL_KV_CONNECTORS=true` is what pulls in lmcache (0.5.4 at this commit's
+`requirements/kv_connectors.txt`):
+
+```bash
+git clone https://github.com/vllm-project/vllm
+cd vllm && git checkout 487ecf187
+DOCKER_BUILDKIT=1 docker build . \
+  --file docker/Dockerfile \
+  --target vllm-openai \
+  --tag vllm/vllm-openai:glm53-flash-x86_64-cu130 \
+  --build-arg CUDA_VERSION=13.0.1 \
+  --build-arg PYTHON_VERSION=3.12 \
+  --build-arg INSTALL_KV_CONNECTORS=true \
+  --build-arg torch_cuda_arch_list="7.5 8.0 8.6 8.9 9.0 10.0 12.0" \
+  --build-arg FLASHINFER_VERSION=0.6.17 \
+  --build-arg max_jobs=32 --build-arg nvcc_threads=2
+```
+
+The compile takes a few hours. Verify afterwards:
+`docker run --rm --entrypoint python3 <tag> -c "import vllm, lmcache; print(vllm.__version__, lmcache.__version__)"`
+should print `0.1.dev20051+g487ecf187 0.5.4`. Trim `torch_cuda_arch_list` to
+`12.0` if you only need SM120 — faster build, same result on these GPUs.
+
 ## Why stock LMCache fails on glm5_next, and what each overlay fixes
 
 The model registers 67 KV tensors per GPU: 11 indexer `k_cache` + 11 MLA
