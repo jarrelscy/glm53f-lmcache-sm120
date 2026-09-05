@@ -164,9 +164,41 @@ with the fix, the full-attention object group is
 `11 x (1,175,552 + 59,136) = 13,581,568` bytes per chunk (the broken geometry
 stored `13,024,000`). The KDA object group is `34 x 1,175,552 = 39,968,768`.
 
+For multi-request safety, `patches/contamination_gate.py` fires N concurrent
+prompts that each carry a **unique** passphrase and unique filler salt, so any
+cross-request KV mixup (wrong blocks restored, shared recurrent state, indexer
+pool crosstalk) surfaces as a foreign passphrase or a changed sha:
+
+```bash
+python3 patches/contamination_gate.py 8 16000 CONT-S   # concurrent store
+# docker compose down && up, wait for ready
+python3 patches/contamination_gate.py 8 16000 CONT-R   # concurrent cold restore
+```
+
+Per-request shas must match between the two phases and no reply may contain
+another request's passphrase.
+
 A correct-looking retrieve with corrupt output has exactly one more place to
 hide: block *counts* are not block *bytes*. If you change anything in this
 stack, gate with the sha, not with the logs.
+
+## Gate results (2026-09-05, this exact stack)
+
+All gates below ran on the fixed overlays with `ENABLE_LMCACHE=1`:
+
+- Needle sha match, byte-for-byte, vs the recompute reference: warm repeat,
+  cold restart at 11K tokens, cold restart at 116K tokens, and 3 concurrent
+  cold restores at depths 0.25/0.55/0.85.
+- 8-way concurrent contamination gate: all 8 unique passphrases answered
+  correctly in both phases, all 8 shas match store vs cold restore, zero
+  foreign passphrases. Restore latency 27 s vs 70 s recompute.
+- L2 object sizes confirm the fixed geometry: 13,581,568 B (full-attention
+  group) and 39,968,768 B (KDA group) per 1792-token chunk.
+- 4 terminal-bench-2.1 tasks (terminus-2 agent, multi-turn agentic load) with
+  LMCache on: cancel-async-tasks 1.0, gcode-to-text 1.0 (0.0 without LMCache
+  in the original 89-task run), filter-js-from-html 0.0 (also 0.0 originally),
+  chess-best-move hit an in-task 120 s command timeout (flake class also seen
+  in the original run). Zero engine errors across everything.
 
 ## Hardware
 
