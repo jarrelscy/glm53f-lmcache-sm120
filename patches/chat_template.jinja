@@ -69,7 +69,7 @@ For each function call, output the function name and arguments within the follow
             {%- endif -%}
         {%- endfor -%}
     {%- elif content is not none -%}
-        {{- content }}
+        {{- content -}}
     {%- endif -%}
 {%- endmacro -%}
 {%- macro tool_response(text) -%}
@@ -159,7 +159,7 @@ For each function call, output the function name and arguments within the follow
 {%- if tc.function %}
     {%- set tc = tc.function %}
 {%- endif %}
-{{- '<tool_call>' + tc.name -}}
+{{- '<tool_call>' ~ tc.name -}}
 {% set _args = tc.arguments %}{% for k, v in _args.items() %}<arg_key>{{ k }}</arg_key><arg_value>{{ v | tojson(ensure_ascii=False) if v is not string else v }}</arg_value>{% endfor %}</tool_call>{% endfor %}
 {% endif %}
 {%- elif m.role == 'tool' -%}
@@ -220,7 +220,7 @@ For each function call, output the function name and arguments within the follow
                     {%- break -%}
                 {%- endif -%}
             {%- endfor -%}
-    {%- endfor -%}
+        {%- endfor -%}
     {%- endif -%}
     {%- if ns_chk.can_sort -%}
         {%- for tc in ns_a.tool_calls -%}
@@ -237,8 +237,8 @@ For each function call, output the function name and arguments within the follow
                                 {{- tool_response(visible_text(entry.output)) -}}
                             {%- endif -%}
                         {%- endif -%}
-    {%- endfor -%}
-{%- else -%}
+                    {%- endfor -%}
+                {%- else -%}
                     {%- set tk_id = id_of(m) -%}
                     {%- if tk_id == tc_id -%}
                         {{- render_tool_response(m) -}}
