@@ -1,0 +1,85 @@
+# GLM-5.3-Flash-Uncensored NVFP4 + LMCache on 4x SM120 (RTX PRO 6000 Blackwell)
+#
+# Serves orcarouter/GLM-5.3-Flash-Uncensored-NVFP4 (arch glm5_next: 34 KDA
+# linear-attention layers + 11 DSA/MLA layers) on :8001 as `glm-5.3f`, with
+# LMCache KV offload (DRAM + disk) that survives cold restarts.
+#
+# See README.md for the image recipe, the overlay-by-overlay explanation, and
+# the lossless gate procedure. Weights layout expected under /data/huggingface.
+services:
+  vllm-glm53f-lmcache:
+    # Local vLLM build: upstream vllm-project/vllm @ 487ecf187
+    # (0.1.dev20051+g487ecf187), CUDA 13.0 base, torch 2.13.0+cu130,
+    # flashinfer 0.6.17, lmcache 0.5.4 (pip). See README "Image".
+    image: vllm/vllm-openai:glm53-flash-x86_64-cu130
+    env_file:
+      - .env
+    environment:
+      - HF_HOME=/data/huggingface
+      - VLLM_ENGINE_READY_TIMEOUT_S=3600
+      # This checkpoint is weight-only NVFP4 (no calibrated input_scale). The
+      # native FLASHINFER_CUTLASS FP4 MoE kernel emits token-loop garbage on
+      # weight-only quants, which drives the KDA Triton kernel into an illegal
+      # memory access and kills the engine. Force the Marlin w4a16 dequant
+      # path for the compressed-tensors NVFP4 MoE oracle. (The similarly-named
+      # VLLM_MXFP4_USE_MARLIN is the MXFP4 path and does NOT work here.)
+      - VLLM_TEST_FORCE_FP8_MARLIN=1
+      # LMCache via the HMA-native MP connector (LMCacheMPConnector) + a
+      # co-located MP cache server started by lmcache-mp-entry.sh. The
+      # in-process LMCacheConnectorV1 cannot serve glm5_next (heterogeneous KV:
+      # KDA mamba-class state + MLA + compressed DSA indexer caches).
+      - ENABLE_LMCACHE=${ENABLE_LMCACHE:-1}
+      - LMCACHE_L1_GB=${LMCACHE_L1_GB:-24}
+      - LMCACHE_DISK_GB=${LMCACHE_DISK_GB:-400}
+      - LMCACHE_LOG_LEVEL=${LMCACHE_LOG_LEVEL:-INFO}
+    ports:
+      - "0.0.0.0:8001:8001"
+    volumes:
+      - /data/huggingface:/data/huggingface
+      - /data/triton_cache/glm5.3-flash:/data/triton_cache
+      # LMCache MP server L2 disk tier (persists across restarts -> cold-restart restore)
+      - /data/lmcache/glm5.3-flash-unc:/lmcache/disk
+      # --- entrypoint wrapper: starts the LMCache MP server, then execs vllm serve
+      - ./patches/lmcache-mp-entry.sh:/overlays/lmcache-mp-entry.sh:ro
+      # --- LMCache 0.5.4 overlays (the actual fixes; see README) ---
+      - ./patches/kv_cache_group_edits.py:/usr/local/lib/python3.12/dist-packages/lmcache/integration/vllm/kv_cache_group_edits.py:ro
+      - ./patches/lmcache_mp_metadata.py:/usr/local/lib/python3.12/dist-packages/lmcache/integration/vllm/lmcache_mp_metadata.py:ro
+      - ./patches/lmcache_mp_connector.py:/usr/local/lib/python3.12/dist-packages/lmcache/integration/vllm/lmcache_mp_connector.py:ro
+      - ./patches/kv_cache_groups.py:/usr/local/lib/python3.12/dist-packages/lmcache/integration/vllm/kv_cache_groups.py:ro
+      - ./patches/vllm_multi_process_adapter.py:/usr/local/lib/python3.12/dist-packages/lmcache/integration/vllm/vllm_multi_process_adapter.py:ro
+      # --- vLLM SM120 overlays (DSA sparse MLA on Blackwell workstation) ---
+      - ./patches/backend.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backend.py:ro
+      - ./patches/flashinfer_mla_sparse_sm120.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm120.py:ro
+      - ./patches/cuda.py:/usr/local/lib/python3.12/dist-packages/vllm/platforms/cuda.py:ro
+      - ./patches/glm5next_model.py:/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/nvidia/model.py:ro
+      - ./patches/glm5next_mtp.py:/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/nvidia/mtp.py:ro
+      - ./patches/chat_template.jinja:/overlays/chat_template.jinja:ro
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 4
+              capabilities: [gpu]
+    restart: "no"
+    entrypoint: ["/overlays/lmcache-mp-entry.sh"]
+    command:
+      - "/data/huggingface/hub/models--orcarouter--GLM-5.3-Flash-Uncensored-NVFP4/snapshots/414d5eeeb2e49e09a58cfed1a4c6f839f5796b00"
+      - "--served-model-name=glm-5.3f"
+      - "--tensor-parallel-size=4"
+      - "--trust-remote-code"
+      - "--seed=3407"
+      - "--max-model-len=1048576"
+      # No --speculative-config: the orcarouter checkpoint drops the MTP block.
+      - "--enable-prefix-caching"
+      - "--gpu-memory-utilization=${GLM_UNC_UTIL:-0.95}"
+      - "--max-num-seqs=8"
+      - "--reasoning-parser=glm45"
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser=glm47"
+      - "--chat-template=/overlays/chat_template.jinja"
+      # --kv-transfer-config (LMCacheMPConnector), --mamba-cache-mode=align and
+      # --num-gpu-blocks-override are appended by lmcache-mp-entry.sh when
+      # ENABLE_LMCACHE=1.
+      - "--port=8001"
